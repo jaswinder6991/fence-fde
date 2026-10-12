@@ -1,0 +1,2 @@
+receivable_external_id,merchant_name,obligor_name,sector,purchase_date,face_value,purchase_price,number_of_installments,currency,obligor_risk_score,outstanding_balance,days_past_due
+SL-TEST-1,Test Merchant,Test Obligor,Retail,2025-01-15,10000,9900,4,USD,80,5000.00,0

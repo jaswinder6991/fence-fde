@@ -1,0 +1,3 @@
+payment_id,receivable_external_id,payment_date,amount
+P-TEST-1,SL-TEST-1,2025-02-15,2500.00
+P-TEST-2,SL-TEST-1,2025-03-15,2500.00
