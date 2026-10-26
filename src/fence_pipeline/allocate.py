@@ -17,114 +17,6 @@ from fence_pipeline.models import (
     ReceivableCurrent,
     RowException,
 )
-from fence_pipeline.schedule import build_schedule
-
-INSTALLMENT_INSERT_BATCH = 1000
-
-
-def build_missing_schedules(session: Session, run_id: int) -> dict[str, int]:
-    """Create installments for active receivables that have none yet.
-
-    Reads only the active live book and its installments (Core columns), not
-    historical rows for inactivated receivables.
-    """
-    created = 0
-    drift = 0
-
-    receivables = session.execute(
-        select(
-            ReceivableCurrent.receivable_external_id,
-            ReceivableCurrent.purchase_date,
-            ReceivableCurrent.face_value,
-            ReceivableCurrent.number_of_installments,
-        ).where(ReceivableCurrent.active.is_(True))
-    ).all()
-
-    inst_rows = session.execute(
-        select(
-            Installment.receivable_external_id,
-            Installment.seq,
-            Installment.due_date,
-            Installment.amount_due,
-        )
-        .join(
-            ReceivableCurrent,
-            ReceivableCurrent.receivable_external_id
-            == Installment.receivable_external_id,
-        )
-        .where(ReceivableCurrent.active.is_(True))
-        .order_by(Installment.receivable_external_id, Installment.seq)
-    ).all()
-    by_recv: dict[str, list] = defaultdict(list)
-    for row in inst_rows:
-        by_recv[row.receivable_external_id].append(row)
-
-    new_rows: list[dict] = []
-    for recv in receivables:
-        ext_id = recv.receivable_external_id
-        existing = by_recv.get(ext_id, [])
-        expected = build_schedule(
-            recv.purchase_date,
-            Decimal(recv.face_value),
-            int(recv.number_of_installments),
-        )
-
-        if not existing:
-            for spec in expected:
-                new_rows.append(
-                    {
-                        "receivable_external_id": ext_id,
-                        "seq": spec.seq,
-                        "due_date": spec.due_date,
-                        "amount_due": spec.amount_due,
-                        "amount_applied": Decimal("0.00"),
-                    }
-                )
-            created += 1
-            continue
-
-        if len(existing) != len(expected):
-            drift += 1
-            session.add(
-                RowException(
-                    run_id=run_id,
-                    source="schedule",
-                    row_key=ext_id,
-                    reason=(
-                        "unsupported schedule change: installment count differs; "
-                        "keeping original schedule — Starfleet should correct "
-                        "the export or confirm intentional change"
-                    ),
-                )
-            )
-            continue
-
-        mismatched = any(
-            row.due_date != spec.due_date
-            or Decimal(row.amount_due) != spec.amount_due
-            for row, spec in zip(existing, expected, strict=True)
-        )
-        if mismatched:
-            drift += 1
-            session.add(
-                RowException(
-                    run_id=run_id,
-                    source="schedule",
-                    row_key=ext_id,
-                    reason=(
-                        "unsupported schedule change: due date or amount differs; "
-                        "keeping original schedule — Starfleet should correct "
-                        "the export or confirm intentional change"
-                    ),
-                )
-            )
-
-    for i in range(0, len(new_rows), INSTALLMENT_INSERT_BATCH):
-        session.execute(insert(Installment), new_rows[i : i + INSTALLMENT_INSERT_BATCH])
-    session.commit()
-    return {"created": created, "drift_flagged": drift}
-
-
 def _cleanup_partial_allocations(session: Session) -> int:
     """Remove allocations for payments that never got an applied marker.
 
@@ -133,6 +25,7 @@ def _cleanup_partial_allocations(session: Session) -> int:
     orphan_alloc = ~select(PaymentApplied.payment_id).where(
         PaymentApplied.payment_id == PaymentAllocation.payment_id
     ).exists()
+
 
     touched = session.execute(
         select(
@@ -143,9 +36,11 @@ def _cleanup_partial_allocations(session: Session) -> int:
         .distinct()
     ).all()
 
+    
     result = session.execute(delete(PaymentAllocation).where(orphan_alloc))
     deleted = result.rowcount or 0
 
+    
     for ext_id, seq in touched:
         total = session.scalar(
             select(func.coalesce(func.sum(PaymentAllocation.amount), 0)).where(
@@ -181,6 +76,7 @@ def allocate_unapplied_payments(
     no_schedule = 0
     overpay = 0
 
+    ## hashset for active ids for O(1) lookups
     active_ids = set(
         session.scalars(
             select(ReceivableCurrent.receivable_external_id).where(
@@ -190,7 +86,8 @@ def allocate_unapplied_payments(
     )
 
     schedules: dict[str, list[dict]] = defaultdict(list)
-    for row in session.execute(
+    ## installments of active receivables
+    active_installments = session.execute(
         select(
             Installment.receivable_external_id,
             Installment.seq,
@@ -204,7 +101,16 @@ def allocate_unapplied_payments(
         )
         .where(ReceivableCurrent.active.is_(True))
         .order_by(Installment.receivable_external_id, Installment.seq)
-    ):
+    ).all()
+
+    ## example schedules:
+    ## {
+    ##     "1234567890": [
+    ##         {"seq": 1, "amount_due": 100, "amount_applied": 0},
+    ##         {"seq": 2, "amount_due": 100, "amount_applied": 0},
+    ##     ],
+    ## }
+    for row in active_installments:
         schedules[row.receivable_external_id].append(
             {
                 "seq": row.seq,
@@ -213,6 +119,7 @@ def allocate_unapplied_payments(
             }
         )
 
+    ## payments not yet in payments_applied
     pending = session.execute(
         select(
             PaymentEvent.payment_id,
@@ -226,9 +133,15 @@ def allocate_unapplied_payments(
         .order_by(PaymentEvent.payment_date, PaymentEvent.payment_id)
     ).all()
 
+
     alloc_buffer: list[dict] = []
     applied_buffer: list[dict] = []
     exception_buffer: list[RowException] = []
+    ## example applied_updates:
+    ## {
+    ##     ("1234567890", 1): 100,
+    ##     ("1234567890", 2): 100,
+    ## }
     applied_updates: dict[tuple[str, int], Decimal] = {}
 
     def flush() -> None:
@@ -265,8 +178,15 @@ def allocate_unapplied_payments(
         payment_id = payment.payment_id
         ext_id = payment.receivable_external_id
         remaining = Decimal(payment.amount)
+        # example schedule
+        #[
+        #    {"seq": 1, "amount_due": 100, "amount_applied": 0},
+        #    {"seq": 2, "amount_due": 100, "amount_applied": 0},
+        #]
         schedule = schedules.get(ext_id)
 
+        # If the schedule is not found, it means the receivable is not in the active book
+        # so we add an exception to the exception buffer and continue
         if schedule is None:
             if ext_id not in active_ids:
                 # Hold pending: exception only, no payments_applied. Retries when
@@ -304,6 +224,8 @@ def allocate_unapplied_payments(
                 flush()
             continue
 
+        ## if the schedule is found, we iterate over the installments 
+        ## and apply the payment to the installments
         for inst in schedule:
             if remaining <= 0:
                 break

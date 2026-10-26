@@ -8,14 +8,12 @@ from pathlib import Path
 
 from sqlalchemy import delete, select
 
-from fence_pipeline.allocate import allocate_unapplied_payments, build_missing_schedules
+from fence_pipeline.allocate import allocate_unapplied_payments
+from fence_pipeline.schedule import build_missing_schedules
 from fence_pipeline.db import ensure_schema, get_dsn, session_scope
 from fence_pipeline.evaluate import evaluate_run
-from fence_pipeline.ingest import (
-    ingest_collections,
-    ingest_receivables,
-    project_receivables_current,
-)
+from fence_pipeline.ingest import ingest_collections, ingest_receivables
+from fence_pipeline.live_book import project_receivables_current
 from fence_pipeline.models import PipelineRun, ReceivableEvent, RowException
 
 

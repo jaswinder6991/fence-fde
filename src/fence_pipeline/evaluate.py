@@ -52,10 +52,12 @@ def evaluate_run(session: Session, run_id: int) -> dict:
         .where(ReceivableCurrent.active.is_(True))
         .group_by(Installment.receivable_external_id)
     ).all()
+    ## making a dict of "external_id: total_applied"
     applied_by_recv = {
         row.receivable_external_id: Decimal(row.total_applied) for row in applied_rows
     }
 
+    ## obligor_name -> receivable external ids with Defaulted status
     obligor_defaulted: dict[str, set[str]] = defaultdict(set)
     for recv in receivables:
         status = derive_status(
@@ -76,6 +78,7 @@ def evaluate_run(session: Session, run_id: int) -> dict:
         computed = computed_outstanding(face, total_applied)
         mismatch = outstanding_mismatch(export_out, computed)
 
+        ## finding if any other receivables for the same obligor have defaulted
         other_defaulted = any(
             other_id != ext_id
             for other_id in obligor_defaulted.get(recv.obligor_name, set())
