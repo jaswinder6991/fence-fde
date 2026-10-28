@@ -2,61 +2,135 @@
 
 ## How history is kept
 
-Each receivable has a persistent pointer `receivables_current.current_schedule_version`.
-Installments and payment allocations are keyed by `(receivable, schedule_version, …)`.
+Each live receivable has one pointer: `current_schedule_version` on
+`receivables_current`. Installment rows and payment allocations carry the same
+`schedule_version`. Allocate and reports use only the version the pointer names;
+older versions stay in the database for audit.
 
-On a term change (`face_value` / `number_of_installments` such that the Section 5
-plan no longer matches the current version):
+On a term change (`face_value` or `number_of_installments` so the Section 5 plan
+no longer matches the current version):
 
 1. Leave the old version’s installments and allocations untouched (audit).
 2. Insert a new version built from the latest terms.
 3. Point `current_schedule_version` at that new version.
 4. Clear `payments_applied` for that receivable’s payments so allocate re-applies
    cash onto the **current** plan only (same `payment_id`s — nothing double-counted).
-5. Record `source=correction` with before→after face/N and version numbers.
+5. Record `source=correction` with before→after face / installment count and version numbers.
 
-Allocate, evaluate, and the schedule report join only the current version.
-Crash cleanup of partial allocations is also scoped to the current version so
-reopening payments cannot wipe prior-version audit rows.
+### Example (SL-C-1 after export-2)
 
-Optional later: a `receivable_schedules` header storing terms-at-version
-([issue #1](https://github.com/jaswinder6991/fence-fde/issues/1)).
+Face fell from 6000 → 3000; installment count stayed 6. Two $1000 payments already
+existed on the old plan.
 
-## Decisions beyond the PDF bullets
+**`receivables_current`**
 
-| Case | Decision |
-|------|----------|
-| Position-only OB/DPD update | Not a correction; keep schedule (existing path). |
-| Excess cash after refill (paid > new face) | Waterfall fills through the **last** installment; leftover is an allocate exception (excess). Closed vs open comes from declared OB/DPD. AEB still uses declared OB — excess does not rewrite the pool. |
-| Refund / credit of excess | Out of scope; Ops/Starfleet decision. We report it. |
-| `purchase_date` change | Not in the fixture; any due-date mismatch vs current plan still rebuilds (same path as face/N). |
-| Face/N increase | Same rebuild path; not seen in sample data. |
-| Purchase price | Tracks Starfleet’s discount; not a schedule trigger. |
+| receivable_external_id | face_value | current_schedule_version |
+|------------------------|------------|--------------------------|
+| SL-C-1                 | 3000       | **2**                    |
 
-## Left out (and why)
+**`installments`** (both versions kept)
 
-- No separate `overpaid` money column — excess is visible in exceptions and in
-  `amount_applied` vs `amount_due` on the current plan; a column can wait for Ops needs.
-- No payment restatement handling — collections remain append-only by `payment_id`.
-- No daytime mid-file correction API — still nightly full-export CLI.
+| receivable | schedule_version | seq | amount_due | role        |
+|------------|------------------|-----|------------|-------------|
+| SL-C-1     | 1                | 1–6 | 1000 each  | audit only  |
+| SL-C-1     | **2**            | 1–6 | 500 each   | **live**    |
 
-## Questions for Operations
+**`payment_allocations`**
 
-1. Should excess after a closed correction auto-suggest refund, or only alert?
-2. If Starfleet later raises face again, is a third schedule version always correct?
-3. Do you want term-at-version headers in the DB for reporting, or are events + installment rows enough?
+| payment_id | schedule_version | installment_seq | amount | role       |
+|------------|------------------|-----------------|--------|------------|
+| P-C1-1, …  | 1                | …               | …      | audit only |
+| P-C1-1, …  | **2**            | …               | …      | **live**   |
 
-## Results — original full exports (same DB, in order)
+Live work always joins `schedule_version = current_schedule_version` (here, 2).
+
+### Why this shape
+
+We needed the old plan and its allocations to stay queryable, and the live path to
+keep using one clear “current” schedule. Putting a version on installment and
+allocation rows, plus a single pointer on the live receivable, does that without
+a second copy of the book.
+
+Other shapes were weaker for us:
+
+- **`is_current` on every installment row** — redundant, easy to leave two
+  versions “current.”
+- **`MAX(version)` with no pointer** — no explicit live plan; awkward if a bad
+  rebuild must not become current.
+- **Archive / snapshot tables** — history exists, but audit uses a different
+  shape than the hot path.
+- **Version the whole receivable** — duplicates `receivable_events`; only the
+  derived schedule needed versioning.
+
+---
+
+## Cases the PDF leaves open
+
+The must-hold bullets say: new schedule, conserve payments, keep history, stay
+idempotent, report corrections. They do not say what to do when cash already sat
+on the old plan, or when that cash exceeds the new face. Those show up in the
+corrections fixture.
+
+### 1. Payments already collected on the older schedule
+
+**In the data:** four of five corrected IDs already had collections before export-2
+(SL-C-1, SL-C-3, SL-C-4, SL-C-6). Only SL-C-5 had none.
+
+**Platform:** rebuild the schedule, then re-apply every known `payment_id` onto the
+new plan with the same §7.3 waterfall used for ordinary collections (earliest
+unpaid first; excess rolls forward within the plan).
+
+| | |
+|--|--|
+| **Status / eligibility** | Still from Starfleet’s declared outstanding balance and DPD. |
+| **Operations** | Sees `source=correction` (what changed) and the new schedule; old version remains queryable. |
+| **Lender figures** | AEB / borrowing base still use **declared** outstanding — not “face − applied”. |
+
+### 2. Closed receivable with excess after correction
+
+**In the data:** SL-C-3 (paid 1000 vs new face 800) and SL-C-6 (paid 4000 vs new
+face 3000). Both declare outstanding balance **0** after the correction.
+
+**Platform:** fill the new schedule under §7.3; any cash left after the plan is
+full is an allocate **excess** exception. We do not invent further installments
+or change declared OB.
+
+| | |
+|--|--|
+| **Status** | Closed when declared OB is 0 (and DPD &lt; 90). |
+| **Operations** | Sees excess amount and receivable id; refund / credit is Starfleet’s call. |
+| **Lender figures** | Receivable contributes **0** to AEB via declared OB. Excess is **not** written into the borrowing base. |
+
+### 3. `purchase_date` change
+
+**In the corrections fixture:** never happens. The original facility materials
+treat purchase date as schedule-defining; this follow-up feed does not exercise it.
+
+**Platform:** if due dates ever diverged from the current plan, we would rebuild
+the same way as a face / N change. Not demonstrated here.
+
+---
+
+## Question for Operations
+
+When the platform shows excess cash after the current schedule is full (paid more
+than the corrected face — a credit / “negative owe” vs face while Starfleet may
+still declare OB = 0):
+
+**Should the lender see that excess**, or should it stay an Ops ↔ Starfleet
+exception (report only), with the lender continuing to rely on declared
+outstanding alone?
+
+---
+
+## Results — original full exports
 
 | Export | Corrected | AEB | Borrowing base |
 |--------|----------:|----:|---------------:|
-| `data/receivables.csv` + `collections.csv` | 0 | 179,481,301.98 | 152,559,106.68 |
-| `data/receivables-later.csv` + `collections-later.csv` | **19** | 147,586,696.14 | 123,269,981.43 |
+| `receivables.csv` + `collections.csv` | 0 | 179,481,301.98 | 152,559,106.68 |
+| `receivables-later.csv` + `collections-later.csv` | **19** | 147,586,696.14 | 123,269,981.43 |
 
-AEB / borrowing base match prior (pre-corrections-feature) runs on the same files.
-That is expected: the pool still uses **declared** outstanding balance; rebuilding
-schedules changes allocation/reconcile, not the contractual AEB inputs.
+AEB / BB match pre-corrections runs on the same files (pool uses declared OB).
 
-Corrections fixture (`data/corrections/`): export-2 marks **5** receivables corrected
-(SL-C-1,3,4,5,6); SL-C-2 stays version 1. SL-C-3 / SL-C-6 report excess after the
-new plan is filled (declared Closed / OB=0).
+Corrections fixture: **5** corrected (SL-C-1,3,4,5,6); SL-C-2 position-only;
+SL-C-3 / SL-C-6 excess after the new plan is filled.

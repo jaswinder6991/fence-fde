@@ -56,29 +56,9 @@ Database URL defaults to `postgresql://fence:fence@localhost:5432/fence`
 
 Only one pipeline run may be `running` at a time (single writer on the live book).
 
-### Corrections fixture
-
-```bash
-# Fresh DB, then both exports in order against the same database:
-fence-pipeline run \
-  --receivables data/corrections/receivables-1.csv \
-  --collections data/corrections/collections-1.csv \
-  --output-dir out/corrections-1/
-
-fence-pipeline run \
-  --receivables data/corrections/receivables-2.csv \
-  --collections data/corrections/collections-2.csv \
-  --output-dir out/corrections-2/
-```
-
 `exceptions_report_run_*.csv` includes `source=correction` (what changed) and
-`source=allocate` excess rows when cash exceeds the rebuilt schedule.
-
-### Exploration scripts
-
-```bash
-python3 scripts/explore_corrections/run_all.py
-```
+`source=allocate-excess` rows (with an `amount` column) when cash exceeds the
+rebuilt schedule. Orphan payments use `source=allocate-orphan`.
 
 Persistence uses **SQLAlchemy 2.0** ORM models (`fence_pipeline.models`) with
 Postgres via `psycopg`. Schema is created from model metadata on startup

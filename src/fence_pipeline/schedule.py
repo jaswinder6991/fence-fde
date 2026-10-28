@@ -104,7 +104,7 @@ def build_missing_schedules(session: Session, run_id: int) -> dict[str, int]:
             continue
 
         # Correction: freeze current version, open a new one from latest terms.
-        old_face = sum((Decimal(r.amount_due) for r in existing), Decimal("0.00"))
+        old_face = sum((Decimal(r.amount_due) for r in existing), Decimal("0.00")) # sum(iterable, start=0)
         new_face = Decimal(recv.face_value)
         old_n = len(existing)
         new_n = len(expected)
