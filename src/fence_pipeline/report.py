@@ -26,8 +26,19 @@ DEFAULT_DETAIL_SHEETS = {
     "receivables": "receivables_position_report (parse failures may be absent)",
     "collections": "payment_schedule_report / collections export",
     "schedule": "receivables_position_report",
+    "correction": "receivables_position_report / payment_schedule_report",
     "allocate": "payment_schedule_report",
     "reconcile": "receivables_position_report (outstanding_mismatch)",
+}
+
+DEFAULT_EXCEPTION_ACTIONS = {
+    "correction": (
+        "Review corrected schedule (prior version kept for audit); "
+        "confirm face_value / number_of_installments with Starfleet if unexpected"
+    ),
+    "allocate": (
+        "Review excess or orphan payment; confirm collections / schedule with Starfleet"
+    ),
 }
 
 # Active receivables per keyset page when writing the schedule CSV.
@@ -91,8 +102,14 @@ def write_payment_schedule_report(session: Session, run_id: int, path: Path) -> 
                 )
                 .join(
                     ReceivableCurrent,
-                    ReceivableCurrent.receivable_external_id
-                    == Installment.receivable_external_id,
+                    (
+                        ReceivableCurrent.receivable_external_id
+                        == Installment.receivable_external_id
+                    )
+                    & (
+                        ReceivableCurrent.current_schedule_version
+                        == Installment.schedule_version
+                    ),
                 )
                 .where(
                     ReceivableCurrent.active.is_(True),
@@ -111,8 +128,14 @@ def write_payment_schedule_report(session: Session, run_id: int, path: Path) -> 
                 )
                 .join(
                     ReceivableCurrent,
-                    ReceivableCurrent.receivable_external_id
-                    == PaymentAllocation.receivable_external_id,
+                    (
+                        ReceivableCurrent.receivable_external_id
+                        == PaymentAllocation.receivable_external_id
+                    )
+                    & (
+                        ReceivableCurrent.current_schedule_version
+                        == PaymentAllocation.schedule_version
+                    ),
                 )
                 .where(
                     ReceivableCurrent.active.is_(True),
@@ -384,7 +407,10 @@ def write_exceptions_report(
                     "row_key": exc.row_key or "",
                     "reason": exc.reason,
                     "detail_sheet": sheets.get(exc.source, ""),
-                    "action": "Correct source data and send an updated export",
+                    "action": DEFAULT_EXCEPTION_ACTIONS.get(
+                        exc.source,
+                        "Correct source data and send an updated export",
+                    ),
                 }
             )
     return len(exceptions)
@@ -434,10 +460,16 @@ def write_pool_html_report(
     if "position_csv" in sheet_names:
         sheets["receivables"] = sheet_names["position_csv"]
         sheets["schedule"] = sheet_names["position_csv"]
+        sheets["correction"] = sheet_names["position_csv"]
         sheets["reconcile"] = sheet_names["position_csv"]
     if "schedule_csv" in sheet_names:
         sheets["collections"] = sheet_names["schedule_csv"]
         sheets["allocate"] = sheet_names["schedule_csv"]
+        sheets["correction"] = (
+            f"{sheet_names['position_csv']} / {sheet_names['schedule_csv']}"
+            if "position_csv" in sheet_names
+            else sheet_names["schedule_csv"]
+        )
 
     def esc(value: object) -> str:
         return html.escape(str(value), quote=True)

@@ -17,34 +17,46 @@ from fence_pipeline.models import (
     ReceivableCurrent,
     RowException,
 )
+from fence_pipeline.status import STATUS_CLOSED, derive_status
 def _cleanup_partial_allocations(session: Session) -> int:
-    """Remove allocations for payments that never got an applied marker.
+    """Remove *current-version* allocations for payments lacking an applied marker.
 
-    Uses NOT EXISTS (hash anti-join), not a client-side NOT IN list.
+    Crash-recovery only for the live schedule. Older schedule_version rows are
+    audit history — after a correction we reopen payments (drop applied markers)
+    but must not wipe prior-version allocations.
     """
-    orphan_alloc = ~select(PaymentApplied.payment_id).where(
-        PaymentApplied.payment_id == PaymentAllocation.payment_id
-    ).exists()
-
+    on_current = (
+        select(ReceivableCurrent.current_schedule_version)
+        .where(
+            ReceivableCurrent.receivable_external_id
+            == PaymentAllocation.receivable_external_id
+        )
+        .scalar_subquery()
+    )
+    orphan_alloc = (
+        ~select(PaymentApplied.payment_id)
+        .where(PaymentApplied.payment_id == PaymentAllocation.payment_id)
+        .exists()
+    ) & (PaymentAllocation.schedule_version == on_current)
 
     touched = session.execute(
         select(
             PaymentAllocation.receivable_external_id,
+            PaymentAllocation.schedule_version,
             PaymentAllocation.installment_seq,
         )
         .where(orphan_alloc)
         .distinct()
     ).all()
 
-    
     result = session.execute(delete(PaymentAllocation).where(orphan_alloc))
     deleted = result.rowcount or 0
 
-    
-    for ext_id, seq in touched:
+    for ext_id, version, seq in touched:
         total = session.scalar(
             select(func.coalesce(func.sum(PaymentAllocation.amount), 0)).where(
                 PaymentAllocation.receivable_external_id == ext_id,
+                PaymentAllocation.schedule_version == version,
                 PaymentAllocation.installment_seq == seq,
             )
         )
@@ -52,6 +64,7 @@ def _cleanup_partial_allocations(session: Session) -> int:
             update(Installment)
             .where(
                 Installment.receivable_external_id == ext_id,
+                Installment.schedule_version == version,
                 Installment.seq == seq,
             )
             .values(amount_applied=total)
@@ -65,8 +78,8 @@ def allocate_unapplied_payments(
 ) -> dict[str, int]:
     """Allocate payments not yet in payments_applied.
 
-    Schedule state is loaded only for the active live book (Core columns).
-    Historical installments on inactivated receivables stay in the DB for audit
+    Schedule state is the *current* schedule_version for the active live book.
+    Older versions and inactive-receivable installments stay in the DB for audit
     but are not pulled into memory here.
     """
     cleaned = _cleanup_partial_allocations(session)
@@ -85,19 +98,44 @@ def allocate_unapplied_payments(
         ).all()
     )
 
+    ## ext_id -> current schedule_version + declared position (for overpay context)
+    current_version: dict[str, int] = {}
+    declared_ob: dict[str, Decimal] = {}
+    declared_dpd: dict[str, int] = {}
+    for row in session.execute(
+        select(
+            ReceivableCurrent.receivable_external_id,
+            ReceivableCurrent.current_schedule_version,
+            ReceivableCurrent.outstanding_balance,
+            ReceivableCurrent.days_past_due,
+        ).where(ReceivableCurrent.active.is_(True))
+    ).all():
+        current_version[row.receivable_external_id] = int(
+            row.current_schedule_version
+        )
+        declared_ob[row.receivable_external_id] = Decimal(row.outstanding_balance)
+        declared_dpd[row.receivable_external_id] = int(row.days_past_due)
+
     schedules: dict[str, list[dict]] = defaultdict(list)
-    ## installments of active receivables
+    ## current-version installments of active receivables
     active_installments = session.execute(
         select(
             Installment.receivable_external_id,
+            Installment.schedule_version,
             Installment.seq,
             Installment.amount_due,
             Installment.amount_applied,
         )
         .join(
             ReceivableCurrent,
-            ReceivableCurrent.receivable_external_id
-            == Installment.receivable_external_id,
+            (
+                ReceivableCurrent.receivable_external_id
+                == Installment.receivable_external_id
+            )
+            & (
+                ReceivableCurrent.current_schedule_version
+                == Installment.schedule_version
+            ),
         )
         .where(ReceivableCurrent.active.is_(True))
         .order_by(Installment.receivable_external_id, Installment.seq)
@@ -139,10 +177,10 @@ def allocate_unapplied_payments(
     exception_buffer: list[RowException] = []
     ## example applied_updates:
     ## {
-    ##     ("1234567890", 1): 100,
-    ##     ("1234567890", 2): 100,
+    ##     ("1234567890", 1, 1): 100,  # ext_id, schedule_version, seq
+    ##     ("1234567890", 1, 2): 100,
     ## }
-    applied_updates: dict[tuple[str, int], Decimal] = {}
+    applied_updates: dict[tuple[str, int, int], Decimal] = {}
 
     def flush() -> None:
         nonlocal alloc_buffer, applied_buffer, exception_buffer
@@ -150,11 +188,12 @@ def allocate_unapplied_payments(
             return
         if alloc_buffer:
             session.execute(insert(PaymentAllocation), alloc_buffer)
-        for (ext_id, seq), amt in applied_updates.items():
+        for (ext_id, version, seq), amt in applied_updates.items():
             session.execute(
                 update(Installment)
                 .where(
                     Installment.receivable_external_id == ext_id,
+                    Installment.schedule_version == version,
                     Installment.seq == seq,
                 )
                 .values(amount_applied=amt)
@@ -224,6 +263,7 @@ def allocate_unapplied_payments(
                 flush()
             continue
 
+        version = current_version[ext_id]
         ## if the schedule is found, we iterate over the installments 
         ## and apply the payment to the installments
         for inst in schedule:
@@ -234,10 +274,11 @@ def allocate_unapplied_payments(
                 continue
             apply_amt = min(open_amt, remaining)
             inst["amount_applied"] += apply_amt
-            applied_updates[(ext_id, inst["seq"])] = inst["amount_applied"]
+            applied_updates[(ext_id, version, inst["seq"])] = inst["amount_applied"]
             alloc_buffer.append(
                 {
                     "payment_id": payment_id,
+                    "schedule_version": version,
                     "receivable_external_id": ext_id,
                     "installment_seq": inst["seq"],
                     "amount": apply_amt,
@@ -247,14 +288,29 @@ def allocate_unapplied_payments(
 
         if remaining > 0:
             overpay += 1
+            # Waterfall already filled installments through the end of the
+            # current plan; leftover is excess cash (not a mid-schedule spill).
+            ob = declared_ob.get(ext_id, Decimal("0.00"))
+            dpd = declared_dpd.get(ext_id, 0)
+            status = derive_status(ob, dpd)
+            closed = status == STATUS_CLOSED
             exception_buffer.append(
                 RowException(
                     run_id=run_id,
                     source="allocate",
                     row_key=payment_id,
                     reason=(
-                        f"payment exceeds remaining schedule by {remaining}; "
-                        "Starfleet should verify amount or schedule inputs"
+                        f"excess {remaining} after filling current schedule "
+                        f"for {ext_id} (declared status {status}, "
+                        f"outstanding_balance={ob}); "
+                        "cash applied through final installment only; "
+                        + (
+                            "receivable is closed — report excess to Starfleet "
+                            "(refund/credit is an Ops decision; AEB uses declared OB)"
+                            if closed
+                            else "receivable still open — report excess to Starfleet; "
+                            "do not invent further installments"
+                        )
                     ),
                 )
             )

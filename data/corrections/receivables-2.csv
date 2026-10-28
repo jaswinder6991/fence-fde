@@ -1,0 +1,7 @@
+receivable_external_id,merchant_name,obligor_name,sector,purchase_date,face_value,purchase_price,number_of_installments,currency,obligor_risk_score,outstanding_balance,days_past_due
+SL-C-1,Mos Eisley Traders,Owen L. Lars,Retail,2026-01-10,3000,2970.00,6,USD,80,1000.00,0
+SL-C-2,Kessel Freight,Han S. Solo,Logistics,2026-01-15,3000,2970.00,3,USD,75,1000.00,16
+SL-C-3,Cloud City Supply,Lando C. Calrissian,Retail,2026-01-20,800,792.00,2,USD,82,0.00,0
+SL-C-4,Naboo Inns,Rugor N. Nass,Hospitality,2026-01-05,700,693.00,3,USD,70,300.00,57
+SL-C-5,Kuat Works,Wedge A. Antilles,Manufacturing,2026-03-25,2000,1980.00,2,USD,77,2000.00,6
+SL-C-6,Bespin Outfitters,Lobot K. Sy,Retail,2026-01-12,3000,2970.00,3,USD,78,0.00,0

@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS receivables_current (
     currency                TEXT NOT NULL,
     obligor_risk_score      INTEGER NOT NULL,
     outstanding_balance     NUMERIC(18, 2) NOT NULL,
-    days_past_due           INTEGER NOT NULL
+    days_past_due           INTEGER NOT NULL,
+    -- Pointer to the live installment plan; bumped when a correction rebuilds the schedule.
+    current_schedule_version INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_receivables_current_active
@@ -75,26 +77,28 @@ CREATE INDEX IF NOT EXISTS idx_receivables_current_active
 
 CREATE TABLE IF NOT EXISTS installments (
     receivable_external_id  TEXT NOT NULL,
+    schedule_version        INTEGER NOT NULL DEFAULT 1,
     seq                     INTEGER NOT NULL,
     due_date                DATE NOT NULL,
     amount_due              NUMERIC(18, 2) NOT NULL,
     amount_applied          NUMERIC(18, 2) NOT NULL DEFAULT 0,
-    PRIMARY KEY (receivable_external_id, seq)
+    PRIMARY KEY (receivable_external_id, schedule_version, seq)
 );
 
 CREATE TABLE IF NOT EXISTS payment_allocations (
     payment_id              TEXT NOT NULL REFERENCES payment_events(payment_id),
+    schedule_version        INTEGER NOT NULL DEFAULT 1,
     receivable_external_id  TEXT NOT NULL,
     installment_seq         INTEGER NOT NULL,
     amount                  NUMERIC(18, 2) NOT NULL,
     allocated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (payment_id, installment_seq),
-    FOREIGN KEY (receivable_external_id, installment_seq)
-        REFERENCES installments (receivable_external_id, seq)
+    PRIMARY KEY (payment_id, schedule_version, installment_seq),
+    FOREIGN KEY (receivable_external_id, schedule_version, installment_seq)
+        REFERENCES installments (receivable_external_id, schedule_version, seq)
 );
 
 CREATE INDEX IF NOT EXISTS idx_payment_allocations_recv
-    ON payment_allocations (receivable_external_id, installment_seq);
+    ON payment_allocations (receivable_external_id, schedule_version, installment_seq);
 
 CREATE TABLE IF NOT EXISTS payments_applied (
     payment_id      TEXT PRIMARY KEY REFERENCES payment_events(payment_id),

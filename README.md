@@ -1,8 +1,14 @@
-# Starfleet facility pipeline (v1)
+# Starfleet facility pipeline
 
 Python CLI that reads Starfleet receivables and collections exports, persists
 append-only events in Postgres, allocates payments idempotently, and writes
 the receivables and pool reports.
+
+**Corrections (follow-up):** when an existing receivable arrives with a different
+`face_value` or `number_of_installments`, the pipeline builds a **new** installment
+schedule (Section 5 rules on the new terms), keeps the prior schedule and
+allocations for audit, re-applies collections onto the current plan, and reports
+the correction. See [submission/corrections-note.md](submission/corrections-note.md).
 
 ## Quick start
 
@@ -42,18 +48,43 @@ Database URL defaults to `postgresql://fence:fence@localhost:5432/fence`
 1. Soft-fail ingest of both CSVs (bad rows → exceptions, run continues)
 2. Append receivable events every run; insert payments once by `payment_id`
 3. Upsert the live `receivables_current` book (one row per ID); inactivate IDs missing from tonight’s full file
-4. Build equal-installment schedules (remainder on last; end-of-month clamp)
-5. Allocate only unapplied payments to earliest unpaid installments
+4. Build equal-installment schedules (remainder on last; end-of-month clamp). On term drift, bump `current_schedule_version`, insert a new plan, keep the old one
+5. Allocate only unapplied payments to earliest unpaid installments on the **current** schedule version (waterfall through the final installment; leftover → excess exception)
 6. Derive status, reconcile outstanding vs export, evaluate eligibility (per-`run_id` results)
-7. Concentration (40% of eligible outstanding by sector) and borrowing base (85%)
+7. Concentration (40% of eligible outstanding by sector) and borrowing base (85%) — AEB uses **declared** outstanding balance
 8. Emit reports; print per-stage timings
 
 Only one pipeline run may be `running` at a time (single writer on the live book).
 
+### Corrections fixture
+
+```bash
+# Fresh DB, then both exports in order against the same database:
+fence-pipeline run \
+  --receivables data/corrections/receivables-1.csv \
+  --collections data/corrections/collections-1.csv \
+  --output-dir out/corrections-1/
+
+fence-pipeline run \
+  --receivables data/corrections/receivables-2.csv \
+  --collections data/corrections/collections-2.csv \
+  --output-dir out/corrections-2/
+```
+
+`exceptions_report_run_*.csv` includes `source=correction` (what changed) and
+`source=allocate` excess rows when cash exceeds the rebuilt schedule.
+
+### Exploration scripts
+
+```bash
+python3 scripts/explore_corrections/run_all.py
+```
+
 Persistence uses **SQLAlchemy 2.0** ORM models (`fence_pipeline.models`) with
 Postgres via `psycopg`. Schema is created from model metadata on startup
-(`Base.metadata.create_all`). The SQL file under `migrations/` remains a
-readable reference for Docker first-boot.
+(`Base.metadata.create_all`), with additive ALTERs in `ensure_schema` for
+`current_schedule_version` / installment `schedule_version`. SQL under
+`migrations/` remains a readable reference.
 
 ## Tests
 

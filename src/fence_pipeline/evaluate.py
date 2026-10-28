@@ -37,6 +37,7 @@ def evaluate_run(session: Session, run_id: int) -> dict:
         select(ReceivableCurrent).where(ReceivableCurrent.active.is_(True))
     ).all()
 
+    # Sum applied cash on the *current* schedule only (not superseded versions).
     applied_rows = session.execute(
         select(
             Installment.receivable_external_id,
@@ -46,8 +47,14 @@ def evaluate_run(session: Session, run_id: int) -> dict:
         )
         .join(
             ReceivableCurrent,
-            ReceivableCurrent.receivable_external_id
-            == Installment.receivable_external_id,
+            (
+                ReceivableCurrent.receivable_external_id
+                == Installment.receivable_external_id
+            )
+            & (
+                ReceivableCurrent.current_schedule_version
+                == Installment.schedule_version
+            ),
         )
         .where(ReceivableCurrent.active.is_(True))
         .group_by(Installment.receivable_external_id)

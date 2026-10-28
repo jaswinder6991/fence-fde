@@ -182,7 +182,7 @@ def run_pipeline(
                 session.execute(
                     delete(RowException).where(
                         RowException.run_id == run_id,
-                        RowException.source == "schedule",
+                        RowException.source.in_(("schedule", "correction")),
                     )
                 )
                 session.commit()
