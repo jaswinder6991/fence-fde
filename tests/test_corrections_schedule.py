@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from decimal import Decimal
 from pathlib import Path
 
@@ -181,16 +182,26 @@ def test_overpay_after_correction_fills_schedule_then_reports_excess(clean_db, t
         overpays = session.scalars(
             select(RowException).where(
                 RowException.run_id == run_id2,
-                RowException.source == "allocate",
-                RowException.reason.like("excess %"),
+                RowException.source == "allocate-excess",
             )
         ).all()
         reasons = " | ".join(e.reason for e in overpays)
         assert "SL-C-3" in reasons
         assert "SL-C-6" in reasons
         assert "status Closed" in reasons
-        assert "excess 200.00" in reasons or "excess 200" in reasons
-        assert "excess 1000.00" in reasons or "excess 1000" in reasons
+        assert "excess_amount=200.00" in reasons or "excess_amount=200" in reasons
+        assert "excess_amount=1000.00" in reasons or "excess_amount=1000" in reasons
+
+        exc_path = tmp_path / "out2" / f"exceptions_report_run_{run_id2}.csv"
+        with exc_path.open(encoding="utf-8") as f:
+            sheet = list(csv.DictReader(f))
+        excess_rows = [r for r in sheet if r["source"] == "allocate-excess"]
+        assert excess_rows
+        assert all(r["amount"] for r in excess_rows)
+        assert {r["amount"] for r in excess_rows} >= {"200.00", "1000.00"}
+        assert all(
+            "orphan" not in r["action"].lower() for r in excess_rows
+        )
 
 
 def test_correction_run_is_idempotent(clean_db, tmp_path):

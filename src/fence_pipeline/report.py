@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import html
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -27,7 +28,9 @@ DEFAULT_DETAIL_SHEETS = {
     "collections": "payment_schedule_report / collections export",
     "schedule": "receivables_position_report",
     "correction": "receivables_position_report / payment_schedule_report",
-    "allocate": "payment_schedule_report",
+    "allocate-orphan": "payment_schedule_report / collections export",
+    "allocate-excess": "payment_schedule_report",
+    "allocate-no-schedule": "payment_schedule_report / receivables_position_report",
     "reconcile": "receivables_position_report (outstanding_mismatch)",
 }
 
@@ -36,10 +39,19 @@ DEFAULT_EXCEPTION_ACTIONS = {
         "Review corrected schedule (prior version kept for audit); "
         "confirm face_value / number_of_installments with Starfleet if unexpected"
     ),
-    "allocate": (
-        "Review excess or orphan payment; confirm collections / schedule with Starfleet"
+    "allocate-orphan": (
+        "Include the receivable on the next export or remove/correct the payment_id"
+    ),
+    "allocate-excess": (
+        "Review excess cash after schedule was filled; "
+        "confirm refund/credit with Starfleet (AEB uses declared outstanding)"
+    ),
+    "allocate-no-schedule": (
+        "Receivable is active but has no schedule; investigate schedule build"
     ),
 }
+
+_EXCESS_AMOUNT_RE = re.compile(r"^excess_amount=([0-9]+(?:\.[0-9]+)?)")
 
 # Active receivables per keyset page when writing the schedule CSV.
 SCHEDULE_REPORT_CHUNK = 500
@@ -392,6 +404,7 @@ def write_exceptions_report(
         "exception_id",
         "source",
         "row_key",
+        "amount",
         "reason",
         "detail_sheet",
         "action",
@@ -400,11 +413,17 @@ def write_exceptions_report(
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for exc in exceptions:
+            amount = ""
+            if exc.source == "allocate-excess":
+                matched = _EXCESS_AMOUNT_RE.match(exc.reason or "")
+                if matched:
+                    amount = matched.group(1)
             writer.writerow(
                 {
                     "exception_id": exc.exception_id,
                     "source": exc.source,
                     "row_key": exc.row_key or "",
+                    "amount": amount,
                     "reason": exc.reason,
                     "detail_sheet": sheets.get(exc.source, ""),
                     "action": DEFAULT_EXCEPTION_ACTIONS.get(
@@ -464,7 +483,9 @@ def write_pool_html_report(
         sheets["reconcile"] = sheet_names["position_csv"]
     if "schedule_csv" in sheet_names:
         sheets["collections"] = sheet_names["schedule_csv"]
-        sheets["allocate"] = sheet_names["schedule_csv"]
+        sheets["allocate-orphan"] = sheet_names["schedule_csv"]
+        sheets["allocate-excess"] = sheet_names["schedule_csv"]
+        sheets["allocate-no-schedule"] = sheet_names["schedule_csv"]
         sheets["correction"] = (
             f"{sheet_names['position_csv']} / {sheet_names['schedule_csv']}"
             if "position_csv" in sheet_names

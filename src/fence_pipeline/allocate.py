@@ -234,7 +234,7 @@ def allocate_unapplied_payments(
                 exception_buffer.append(
                     RowException(
                         run_id=run_id,
-                        source="allocate",
+                        source="allocate-orphan",
                         row_key=payment_id,
                         reason=(
                             f"orphan payment: receivable {ext_id} not in active book; "
@@ -252,7 +252,7 @@ def allocate_unapplied_payments(
             exception_buffer.append(
                 RowException(
                     run_id=run_id,
-                    source="allocate",
+                    source="allocate-no-schedule",
                     row_key=payment_id,
                     reason=f"no schedule for receivable {ext_id}",
                 )
@@ -297,12 +297,12 @@ def allocate_unapplied_payments(
             exception_buffer.append(
                 RowException(
                     run_id=run_id,
-                    source="allocate",
+                    source="allocate-excess",
                     row_key=payment_id,
                     reason=(
-                        f"excess {remaining} after filling current schedule "
-                        f"for {ext_id} (declared status {status}, "
-                        f"outstanding_balance={ob}); "
+                        f"excess_amount={remaining}; "
+                        f"after filling current schedule for {ext_id} "
+                        f"(declared status {status}, outstanding_balance={ob}); "
                         "cash applied through final installment only; "
                         + (
                             "receivable is closed — report excess to Starfleet "

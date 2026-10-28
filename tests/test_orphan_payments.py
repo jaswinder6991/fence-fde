@@ -64,7 +64,7 @@ def test_orphan_held_then_applied_when_receivable_arrives(tmp_path: Path):
         orphans = session.scalars(
             select(RowException).where(
                 RowException.run_id == run1,
-                RowException.source == "allocate",
+                RowException.source == "allocate-orphan",
             )
         ).all()
         assert len(orphans) == 1
