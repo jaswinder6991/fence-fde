@@ -53,14 +53,131 @@ def ensure_schema(dsn: str | None = None) -> None:
     Base.metadata.create_all(engine)
     _migrate_receivables_current_if_needed(engine)
     with engine.begin() as conn:
+        # Corrections prep: live-book pointer to current installment plan version.
+        conn.execute(
+            text(
+                """
+                ALTER TABLE receivables_current
+                ADD COLUMN IF NOT EXISTS current_schedule_version
+                INTEGER NOT NULL DEFAULT 1
+                """
+            )
+        )
+        _migrate_installment_schedule_version(conn)
+        conn.execute(
+            text(
+                """
+                DROP INDEX IF EXISTS idx_payment_allocations_recv
+                """
+            )
+        )
         conn.execute(
             text(
                 """
                 CREATE INDEX IF NOT EXISTS idx_payment_allocations_recv
-                ON payment_allocations (receivable_external_id, installment_seq)
+                ON payment_allocations (
+                    receivable_external_id, schedule_version, installment_seq
+                )
                 """
             )
         )
+
+
+def _migrate_installment_schedule_version(conn) -> None:
+    """Add schedule_version to installments/allocations; rebuild PK/FK if needed."""
+    conn.execute(
+        text(
+            """
+            ALTER TABLE installments
+            ADD COLUMN IF NOT EXISTS schedule_version INTEGER NOT NULL DEFAULT 1
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE payment_allocations
+            ADD COLUMN IF NOT EXISTS schedule_version INTEGER NOT NULL DEFAULT 1
+            """
+        )
+    )
+    already_versioned = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.key_column_usage
+            WHERE table_schema = 'public'
+              AND table_name = 'installments'
+              AND constraint_name = 'installments_pkey'
+              AND column_name = 'schedule_version'
+            """
+        )
+    ).scalar()
+    if already_versioned:
+        return
+    conn.execute(
+        text(
+            """
+            ALTER TABLE payment_allocations
+            DROP CONSTRAINT IF EXISTS
+                payment_allocations_receivable_external_id_installment_seq_fkey
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE payment_allocations
+            DROP CONSTRAINT IF EXISTS payment_allocations_installment_fkey
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE payment_allocations
+            DROP CONSTRAINT IF EXISTS payment_allocations_pkey
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE installments
+            DROP CONSTRAINT IF EXISTS installments_pkey
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE installments
+            ADD PRIMARY KEY (receivable_external_id, schedule_version, seq)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE payment_allocations
+            ADD PRIMARY KEY (payment_id, schedule_version, installment_seq)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE payment_allocations
+            ADD CONSTRAINT payment_allocations_installment_fkey
+            FOREIGN KEY (
+                receivable_external_id, schedule_version, installment_seq
+            )
+            REFERENCES installments (
+                receivable_external_id, schedule_version, seq
+            )
+            """
+        )
+    )
 
 
 def _migrate_receivables_current_if_needed(engine: Engine) -> None:

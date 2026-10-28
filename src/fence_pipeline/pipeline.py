@@ -182,7 +182,7 @@ def run_pipeline(
                 session.execute(
                     delete(RowException).where(
                         RowException.run_id == run_id,
-                        RowException.source == "schedule",
+                        RowException.source.in_(("schedule", "correction")),
                     )
                 )
                 session.commit()
@@ -200,7 +200,14 @@ def run_pipeline(
                 session.execute(
                     delete(RowException).where(
                         RowException.run_id == run_id,
-                        RowException.source == "allocate",
+                        RowException.source.in_(
+                            (
+                                "allocate",
+                                "allocate-orphan",
+                                "allocate-excess",
+                                "allocate-no-schedule",
+                            )
+                        ),
                     )
                 )
                 session.commit()
@@ -248,7 +255,9 @@ def run_pipeline(
                         "receivables": position_path.name,
                         "collections": schedule_path.name,
                         "schedule": position_path.name,
-                        "allocate": schedule_path.name,
+                        "allocate-orphan": schedule_path.name,
+                        "allocate-excess": schedule_path.name,
+                        "allocate-no-schedule": schedule_path.name,
                         "reconcile": position_path.name,
                     },
                 )

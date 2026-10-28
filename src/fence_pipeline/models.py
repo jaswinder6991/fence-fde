@@ -124,12 +124,20 @@ class ReceivableCurrent(Base):
     obligor_risk_score: Mapped[int] = mapped_column(Integer, nullable=False)
     outstanding_balance: Mapped[Decimal] = mapped_column(Money, nullable=False)
     days_past_due: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Pointer to the live installment plan. Allocate/schedule/report use this
+    # version only; older schedule_version rows stay for audit. Bumped on correction.
+    current_schedule_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class Installment(Base):
     __tablename__ = "installments"
 
     receivable_external_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    schedule_version: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=1, server_default="1"
+    )
     seq: Mapped[int] = mapped_column(Integer, primary_key=True)
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
     amount_due: Mapped[Decimal] = mapped_column(Money, nullable=False)
@@ -142,18 +150,26 @@ class PaymentAllocation(Base):
     __tablename__ = "payment_allocations"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["receivable_external_id", "installment_seq"],
-            ["installments.receivable_external_id", "installments.seq"],
+            ["receivable_external_id", "schedule_version", "installment_seq"],
+            [
+                "installments.receivable_external_id",
+                "installments.schedule_version",
+                "installments.seq",
+            ],
         ),
         Index(
             "idx_payment_allocations_recv",
             "receivable_external_id",
+            "schedule_version",
             "installment_seq",
         ),
     )
 
     payment_id: Mapped[str] = mapped_column(
         Text, ForeignKey("payment_events.payment_id"), primary_key=True
+    )
+    schedule_version: Mapped[int] = mapped_column(
+        Integer, primary_key=True, default=1, server_default="1"
     )
     receivable_external_id: Mapped[str] = mapped_column(Text, nullable=False)
     installment_seq: Mapped[int] = mapped_column(Integer, primary_key=True)
